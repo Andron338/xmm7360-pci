@@ -24,6 +24,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <signal.h>
 #include <unistd.h>
 
 #include "xmm_rpc.h"
@@ -266,14 +267,14 @@ int main(int argc, char *argv[]) {
 
     /* ── disconnect: clean RPC teardown, then exit ─────────────────────────── */
     if (cfg.disconnect) {
-        /* Tear down data channel via RPC so modem reaches
-         * "attached, no bearer" state. --init-only can then
-         * reinitialise without a full module reload. */
+        /* Hard 5-second timeout: if the modem RPC channel is in a bad
+         * state after MM's AT hangup, disconnect must not block forever. */
+        signal(SIGALRM, SIG_DFL);
+        alarm(5);
         xmm_rpc_disconnect(&rpc);
+        alarm(0);
         xmm_if_teardown("wwan0");
-        fprintf(stderr,
-            "RPC disconnect complete.\n"
-            "Run open_xdatachannel --init-only to reinitialise.\n");
+        fprintf(stderr, "RPC disconnect complete.\n");
         xmm_rpc_close(&rpc);
         return 0;
     }

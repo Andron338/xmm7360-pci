@@ -1,17 +1,15 @@
 [Unit]
 Description=XMM7360 ModemManager State Monitor
-# Start after MM is available on D-Bus
 After=ModemManager.service
 Requires=ModemManager.service
+# Restart this service whenever ModemManager restarts
+BindsTo=ModemManager.service
 
 [Service]
 Type=simple
 ExecStart=/usr/bin/xmm7360-watch
 Restart=on-failure
 RestartSec=5
-
-# If MM restarts, restart the watch too
-BindsTo=ModemManager.service
 
 StandardOutput=journal
 StandardError=journal

@@ -1,22 +1,23 @@
 # /usr/lib/udev/rules.d/80-xmm7360.rules
-#
-# 1. Tell ModemManager to use the Fibocom plugin (which knows AT+XCESQ for
-#    LTE signal) instead of the generic plugin (which only knows AT+CSQ).
-#
-# 2. Trigger xmm7360-init.service when the first AT port appears so the
-#    modem's SIM and signal subsystems are initialised before MM probes.
 
 # Prevent PCIe runtime power management from auto-suspending the modem.
-# Without this the kernel may power off the device after idle time.
 ACTION=="add", SUBSYSTEM=="pci", \
     ATTR{vendor}=="0x8086", ATTR{device}=="0x7360", \
     ATTR{power/control}="on"
 
-# Tag ttyXMM ports for the Fibocom MM plugin
+# ── WWAN path (kernel >= 5.15 with CONFIG_WWAN) ───────────────────────────
+# AT ports appear as /dev/wwan0at0, wwan0at1, wwan0at2
+# Tag them for the Fibocom MM plugin (raw IP, AT+XCESQ signal reporting).
+SUBSYSTEM=="wwan", KERNEL=="wwan*at*", ENV{ID_MM_FIBOCOM_TAGGED}="1"
+
+# Trigger xmm7360-init.service on the first WWAN AT port.
+SUBSYSTEM=="wwan", KERNEL=="wwan0at0", ACTION=="add", \
+    TAG+="systemd", ENV{SYSTEMD_WANTS}="xmm7360-init.service"
+
+# ── Legacy TTY fallback (CONFIG_WWAN not available) ───────────────────────
+# AT ports appear as /dev/ttyXMM0, ttyXMM1, ttyXMM2
 SUBSYSTEM=="tty", KERNEL=="ttyXMM*", ENV{ID_MM_FIBOCOM_TAGGED}="1"
 
-# Trigger init on ttyXMM1 only (first AT port = module fully loaded).
-# Use systemd activation so the service runs exactly once and udev
-# doesn't block waiting for it to finish.
+# Trigger init on ttyXMM1 (second AT port = module fully loaded).
 SUBSYSTEM=="tty", KERNEL=="ttyXMM1", ACTION=="add", \
     TAG+="systemd", ENV{SYSTEMD_WANTS}="xmm7360-init.service"

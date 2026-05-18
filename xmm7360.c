@@ -204,6 +204,9 @@ struct queue_pair {
 	int tty_index;
 	int tty_needs_wake;
 	struct device dev;
+#if IS_ENABLED(CONFIG_WWAN)
+	struct wwan_port *wwan_port;  /* AT port in WWAN hierarchy */
+#endif
 	int num;
 	int open;
 	wait_queue_head_t wq;
@@ -655,6 +658,34 @@ static void xmm7360_tty_poll_qp(struct queue_pair *qp)
 		ring->last_handled = (idx + 1) & (ring->depth - 1);
 	}
 }
+
+#if IS_ENABLED(CONFIG_WWAN)
+/* ── WWAN AT port RX ─────────────────────────────────────────────────────── */
+static void xmm7360_wwan_port_poll_qp(struct queue_pair *qp)
+{
+	struct xmm_dev *xmm = qp->xmm;
+	struct td_ring *ring = &xmm->td_ring[qp->num * 2 + 1];
+	struct sk_buff *skb;
+	int idx, nread;
+
+	while (xmm7360_qp_has_data(qp)) {
+		idx   = ring->last_handled;
+		nread = ring->tds[idx].length;
+
+		skb = alloc_skb(nread, GFP_ATOMIC);
+		if (!skb) {
+			dev_err(xmm->dev, "xmm7360: OOM in wwan AT rx\n");
+			break;
+		}
+		skb_put_data(skb, ring->pages[idx], nread);
+		wwan_port_rx(qp->wwan_port, skb);
+
+		xmm7360_td_ring_read(xmm, qp->num * 2 + 1);
+		xmm7360_ding(xmm, DOORBELL_TD);
+		ring->last_handled = (idx + 1) & (ring->depth - 1);
+	}
+}
+#endif /* CONFIG_WWAN */
 
 int xmm7360_cdev_open(struct inode *inode, struct file *file)
 {
@@ -1325,7 +1356,11 @@ static irqreturn_t xmm7360_irq0(int irq, void *dev_id)
 			if (qp->open)
 				wake_up(&qp->wq);
 
-			/* tty tasks */
+			/* AT port RX/wake tasks */
+#if IS_ENABLED(CONFIG_WWAN)
+			if (qp->wwan_port)
+				xmm7360_wwan_port_poll_qp(qp);
+#else
 			if (qp->open && qp->port.ops) {
 				xmm7360_tty_poll_qp(qp);
 				if (qp->tty_needs_wake &&
@@ -1341,6 +1376,7 @@ static irqreturn_t xmm7360_irq0(int irq, void *dev_id)
 					qp->tty_needs_wake = 0;
 				}
 			}
+#endif
 		}
 	}
 
@@ -1362,11 +1398,18 @@ static void xmm7360_dev_deinit(struct xmm_dev *xmm)
 				cdev_del(&xmm->qp[i].cdev);
 				device_unregister(&xmm->qp[i].dev);
 			}
+#if IS_ENABLED(CONFIG_WWAN)
+			if (xmm->qp[i].wwan_port) {
+				wwan_remove_port(xmm->qp[i].wwan_port);
+				xmm->qp[i].wwan_port = NULL;
+			}
+#else
 			if (xmm->qp[i].port.ops) {
 				tty_unregister_device(xmm7360_tty_driver,
 						      xmm->qp[i].tty_index);
 				tty_port_destroy(&xmm->qp[i].port);
 			}
+#endif
 		}
 		memset(&xmm->qp[i], 0, sizeof(struct queue_pair));
 	}
@@ -1521,6 +1564,58 @@ static int xmm7360_create_tty(struct xmm_dev *xmm, int num)
 	return 0;
 }
 
+#if IS_ENABLED(CONFIG_WWAN)
+/* ── WWAN AT port TX/start/stop ─────────────────────────────────────────── */
+
+static int xmm7360_wwan_port_start(struct wwan_port *port)
+{
+	struct queue_pair *qp = wwan_port_get_drvdata(port);
+	return xmm7360_qp_start(qp);
+}
+
+static void xmm7360_wwan_port_stop(struct wwan_port *port)
+{
+	struct queue_pair *qp = wwan_port_get_drvdata(port);
+	xmm7360_qp_stop(qp);
+}
+
+static int xmm7360_wwan_port_tx(struct sk_buff *skb, struct wwan_port *port)
+{
+	struct queue_pair *qp = wwan_port_get_drvdata(port);
+	int ret;
+
+	ret = xmm7360_qp_write(qp, skb->data, skb->len);
+	kfree_skb(skb);
+	return (ret < 0) ? ret : 0;
+}
+
+static const struct wwan_port_ops xmm7360_wwan_port_ops = {
+	.start = xmm7360_wwan_port_start,
+	.stop  = xmm7360_wwan_port_stop,
+	.tx    = xmm7360_wwan_port_tx,
+};
+
+/*
+ * Create a WWAN AT port for the given queue pair.
+ * ModemManager opens /dev/wwan0at0 etc. via the WWAN port interface,
+ * which calls start/stop/tx through xmm7360_wwan_port_ops.
+ */
+static int xmm7360_create_wwan_at_port(struct xmm_dev *xmm, int num)
+{
+	struct queue_pair *qp = xmm7360_init_qp(xmm, num, 8, 4096);
+
+	qp->wwan_port = wwan_create_port(xmm->dev, WWAN_PORT_AT,
+					 &xmm7360_wwan_port_ops, NULL, qp);
+	if (IS_ERR(qp->wwan_port)) {
+		int ret = PTR_ERR(qp->wwan_port);
+		qp->wwan_port = NULL;
+		dev_err(xmm->dev, "wwan_create_port failed: %d\n", ret);
+		return ret;
+	}
+	return 0;
+}
+#endif /* CONFIG_WWAN */
+
 static int xmm7360_create_cdev(struct xmm_dev *xmm, int num, const char *name,
 			       int cardnum)
 {
@@ -1581,6 +1676,14 @@ static int xmm7360_dev_init(struct xmm_dev *xmm)
 	ret = xmm7360_create_cdev(xmm, 3, "xmm%d/trace", xmm->card_num);
 	if (ret)
 		return ret;
+#if IS_ENABLED(CONFIG_WWAN)
+	ret = xmm7360_create_wwan_at_port(xmm, 2);
+	if (ret) return ret;
+	ret = xmm7360_create_wwan_at_port(xmm, 4);
+	if (ret) return ret;
+	ret = xmm7360_create_wwan_at_port(xmm, 7);
+	if (ret) return ret;
+#else
 	ret = xmm7360_create_tty(xmm, 2);
 	if (ret)
 		return ret;
@@ -1590,6 +1693,7 @@ static int xmm7360_dev_init(struct xmm_dev *xmm)
 	ret = xmm7360_create_tty(xmm, 7);
 	if (ret)
 		return ret;
+#endif
 	ret = xmm7360_create_net(xmm);
 	if (ret)
 		return ret;
@@ -1746,6 +1850,7 @@ static int xmm7360_init(void)
 		return ret;
 	}
 
+#if !IS_ENABLED(CONFIG_WWAN)
 	xmm7360_tty_driver = tty_alloc_driver(8, 0);
 	if (IS_ERR(xmm7360_tty_driver)) {
 		pr_err("xmm7360: Failed to allocate tty\n");
@@ -1759,7 +1864,7 @@ static int xmm7360_init(void)
 	xmm7360_tty_driver->subtype = SERIAL_TYPE_NORMAL;
 	xmm7360_tty_driver->flags =
 		TTY_DRIVER_REAL_RAW |
-		TTY_DRIVER_DYNAMIC_DEV; // Could this flags be defined in the flags??
+		TTY_DRIVER_DYNAMIC_DEV;
 	xmm7360_tty_driver->init_termios = tty_std_termios;
 	xmm7360_tty_driver->init_termios.c_cflag = B115200 | CS8 | CREAD |
 						   HUPCL | CLOCAL;
@@ -1773,6 +1878,7 @@ static int xmm7360_init(void)
 		pr_err("xmm7360: failed to register xmm7360_tty driver\n");
 		return ret;
 	}
+#endif /* !CONFIG_WWAN */
 
 	ret = pci_register_driver(&xmm7360_driver);
 	if (ret) {
@@ -1786,8 +1892,10 @@ static void xmm7360_exit(void)
 {
 	pci_unregister_driver(&xmm7360_driver);
 	unregister_chrdev_region(xmm_base, 8);
+#if !IS_ENABLED(CONFIG_WWAN)
 	tty_unregister_driver(xmm7360_tty_driver);
 	tty_driver_kref_put(xmm7360_tty_driver);
+#endif
 }
 
 module_init(xmm7360_init);
