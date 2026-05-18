@@ -642,6 +642,7 @@ static int xmm7360_qp_has_data(struct queue_pair *qp)
 	return xmm->cp->s_rptr[qp->num * 2 + 1] != ring->last_handled;
 }
 
+#if !IS_ENABLED(CONFIG_WWAN)
 static void xmm7360_tty_poll_qp(struct queue_pair *qp)
 {
 	struct xmm_dev *xmm = qp->xmm;
@@ -658,6 +659,7 @@ static void xmm7360_tty_poll_qp(struct queue_pair *qp)
 		ring->last_handled = (idx + 1) & (ring->depth - 1);
 	}
 }
+#endif /* !CONFIG_WWAN */
 
 #if IS_ENABLED(CONFIG_WWAN)
 /* ── WWAN AT port RX ─────────────────────────────────────────────────────── */
@@ -1529,6 +1531,7 @@ static void xmm7360_tty_port_shutdown(struct tty_port *tport)
 	xmm7360_qp_stop(qp);
 }
 
+#if !IS_ENABLED(CONFIG_WWAN)
 static const struct tty_port_operations xmm7360_tty_port_ops = {
 	.activate = xmm7360_tty_port_activate,
 	.shutdown = xmm7360_tty_port_shutdown,
@@ -1563,6 +1566,7 @@ static int xmm7360_create_tty(struct xmm_dev *xmm, int num)
 
 	return 0;
 }
+#endif /* !CONFIG_WWAN */
 
 #if IS_ENABLED(CONFIG_WWAN)
 /* ── WWAN AT port TX/start/stop ─────────────────────────────────────────── */
@@ -1579,7 +1583,7 @@ static void xmm7360_wwan_port_stop(struct wwan_port *port)
 	xmm7360_qp_stop(qp);
 }
 
-static int xmm7360_wwan_port_tx(struct sk_buff *skb, struct wwan_port *port)
+static int xmm7360_wwan_port_tx(struct wwan_port *port, struct sk_buff *skb)
 {
 	struct queue_pair *qp = wwan_port_get_drvdata(port);
 	int ret;
