@@ -58,6 +58,9 @@
 #include <linux/wait.h>
 #include <linux/workqueue.h>
 #include <net/rtnetlink.h>
+#if IS_ENABLED(CONFIG_WWAN)
+#include <linux/wwan.h>
+#endif
 
 MODULE_LICENSE("Dual BSD/GPL");
 
@@ -1115,32 +1118,143 @@ static const struct net_device_ops xmm7360_netdev_ops = {
 	.ndo_start_xmit = xmm7360_net_xmit,
 };
 
-static void xmm7360_net_setup(struct net_device *dev)
+/*
+ * xmm7360_net_init_priv - initialise xmm_net private data embedded in netdev.
+ * Called from both the WWAN newlink callback and the legacy alloc_netdev path.
+ */
+static void xmm7360_net_init_priv(struct net_device *dev)
 {
 	struct xmm_net *xn = netdev_priv(dev);
 	spin_lock_init(&xn->lock);
-	/* Fix: hrtimer_setup() requires non-NULL callback on kernel >= 6.15 */
 #if LINUX_VERSION_CODE < KERNEL_VERSION(6,15,0)
 	hrtimer_init(&xn->deadline, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
 	xn->deadline.function = xmm7360_net_deadline_cb;
 #else
-	hrtimer_setup(&xn->deadline, xmm7360_net_deadline_cb, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+	hrtimer_setup(&xn->deadline, xmm7360_net_deadline_cb,
+		      CLOCK_MONOTONIC, HRTIMER_MODE_REL);
 #endif
 	skb_queue_head_init(&xn->queue);
-
-	dev->netdev_ops = &xmm7360_netdev_ops;
-
-	dev->hard_header_len = 0;
-	dev->addr_len = 0;
-	dev->mtu = 1500;
-	dev->min_mtu = 1500;
-	dev->max_mtu = 1500;
-
-	dev->tx_queue_len = 1000;
-
-	dev->type = ARPHRD_NONE;
-	dev->flags = IFF_POINTOPOINT | IFF_NOARP | IFF_MULTICAST;
 }
+
+/* Common netdev parameters shared by both WWAN and legacy paths */
+static void xmm7360_net_setup(struct net_device *dev)
+{
+	dev->netdev_ops      = &xmm7360_netdev_ops;
+	dev->hard_header_len = 0;
+	dev->addr_len        = 0;
+	dev->mtu             = 1500;
+	dev->min_mtu         = 1500;
+	dev->max_mtu         = 1500;
+	dev->tx_queue_len    = 1000;
+	dev->type            = ARPHRD_NONE;
+	dev->flags           = IFF_POINTOPOINT | IFF_NOARP | IFF_MULTICAST;
+}
+
+#if IS_ENABLED(CONFIG_WWAN)
+/* ── WWAN subsystem integration ──────────────────────────────────────────────
+ *
+ * Registering the net device via wwan_register_ops() places wwan0 into the
+ * kernel WWAN hierarchy.  ModemManager detects this and uses raw IP directly
+ * through wwan0 instead of creating a PPP bearer (ppp0), eliminating PPP
+ * overhead and making signal strength reporting work natively via the Fibocom
+ * plugin.
+ *
+ * The TTY queue pairs (ttyXMM0/1/2) are left as-is — MM still uses them for
+ * AT commands. The WWAN subsystem links them to the same physical device via
+ * the shared PCI parent, so MM can associate AT ports with the data interface.
+ */
+
+static void xmm7360_wwan_setup(struct net_device *dev)
+{
+	/*
+	 * Called by the WWAN subsystem to initialise the netdev before newlink.
+	 * At this point netdev_priv is not yet wired to xmm_dev, so we only set
+	 * the hardware parameters.  xmm_net private data is initialised in
+	 * xmm7360_wwan_newlink() where we have full context.
+	 */
+	xmm7360_net_setup(dev);
+}
+
+static int xmm7360_wwan_newlink(void *ctxt, struct net_device *dev,
+				 u32 if_id, struct netlink_ext_ack *extack)
+{
+	struct xmm_dev *xmm = ctxt;
+	struct xmm_net *xn  = netdev_priv(dev);
+	int ret;
+
+	/* Initialise the xmm_net private data now that we have context */
+	xmm7360_net_init_priv(dev);
+	xn->xmm  = xmm;
+	xmm->net    = xn;
+	xmm->netdev = dev;
+
+	SET_NETDEV_DEV(dev, xmm->dev);
+
+	/* register_netdevice() is called with rtnl_lock already held by the
+	 * WWAN subsystem when it invokes newlink. */
+	ret = register_netdevice(dev);
+	if (ret) {
+		xmm->net    = NULL;
+		xmm->netdev = NULL;
+		return ret;
+	}
+
+	xn->qp = xmm7360_init_qp(xmm, 0, 128, TD_MAX_PAGE_SIZE);
+	ret = xmm7360_qp_start(xn->qp);
+	if (ret < 0) {
+		unregister_netdevice(dev);
+		xmm7360_qp_stop(xn->qp);
+		xmm->net    = NULL;
+		xmm->netdev = NULL;
+		return ret;
+	}
+
+	return 0;
+}
+
+static void xmm7360_wwan_dellink(void *ctxt, struct net_device *dev,
+				  struct list_head *head)
+{
+	struct xmm_dev *xmm = ctxt;
+
+	if (xmm->net) {
+		xmm7360_qp_stop(xmm->net->qp);
+		xmm->net = NULL;
+	}
+	/* unregister_netdevice() called with rtnl_lock held by WWAN subsystem */
+	unregister_netdevice(dev);
+	xmm->netdev = NULL;
+}
+
+static const struct wwan_ops xmm7360_wwan_ops = {
+	.priv_size = sizeof(struct xmm_net), /* netdev_priv == xmm_net */
+	.setup     = xmm7360_wwan_setup,
+	.newlink   = xmm7360_wwan_newlink,
+	.dellink   = xmm7360_wwan_dellink,
+};
+
+static int xmm7360_create_net(struct xmm_dev *xmm)
+{
+	/*
+	 * wwan_register_ops() creates the WWAN parent device, registers our
+	 * ops, and immediately calls newlink to create the default wwan0 link
+	 * (def_link_id = 0).  On success xmm->netdev and xmm->net are set by
+	 * the newlink callback.
+	 */
+	return wwan_register_ops(xmm->dev, &xmm7360_wwan_ops, xmm, 0);
+}
+
+static void xmm7360_destroy_net(struct xmm_dev *xmm)
+{
+	/*
+	 * wwan_unregister_ops() calls dellink for every active link (including
+	 * wwan0), which calls xmm7360_qp_stop and unregister_netdevice, then
+	 * destroys the WWAN parent device.
+	 */
+	wwan_unregister_ops(xmm->dev);
+}
+
+#else /* !CONFIG_WWAN — legacy alloc_netdev fallback */
 
 static int xmm7360_create_net(struct xmm_dev *xmm)
 {
@@ -1150,14 +1264,13 @@ static int xmm7360_create_net(struct xmm_dev *xmm)
 
 	netdev = alloc_netdev(sizeof(struct xmm_net), "wwan%d",
 			      NET_NAME_UNKNOWN, xmm7360_net_setup);
-
 	if (!netdev)
 		return -ENOMEM;
 
+	xmm7360_net_init_priv(netdev);
 	SET_NETDEV_DEV(netdev, xmm->dev);
 
 	xmm->netdev = netdev;
-
 	xn = netdev_priv(netdev);
 	xn->xmm = xmm;
 	xmm->net = xn;
@@ -1167,14 +1280,13 @@ static int xmm7360_create_net(struct xmm_dev *xmm)
 	rtnl_unlock();
 
 	xn->qp = xmm7360_init_qp(xmm, 0, 128, TD_MAX_PAGE_SIZE);
-
 	if (!ret)
 		ret = xmm7360_qp_start(xn->qp);
 
 	if (ret < 0) {
 		free_netdev(netdev);
-		xmm->netdev = NULL;
 		xmm7360_qp_stop(xn->qp);
+		xmm->netdev = NULL;
 	}
 
 	return ret;
@@ -1188,10 +1300,12 @@ static void xmm7360_destroy_net(struct xmm_dev *xmm)
 		unregister_netdevice(xmm->netdev);
 		rtnl_unlock();
 		free_netdev(xmm->netdev);
-		xmm->net = NULL;
+		xmm->net    = NULL;
 		xmm->netdev = NULL;
 	}
 }
+
+#endif /* CONFIG_WWAN */
 
 static irqreturn_t xmm7360_irq0(int irq, void *dev_id)
 {

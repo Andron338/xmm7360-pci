@@ -1,7 +1,9 @@
 obj-m := xmm7360.o
 
 all:
-	$(MAKE) -C /lib/modules/$(KERNELRELEASE)/build M=$(PWD) modules
+	$(MAKE) -C /lib/modules/$(KERNELRELEASE)/build M=$(PWD) \
+		CONFIG_WWAN=m \
+		modules
 
 clean:
 	$(MAKE) -C /lib/modules/$(KERNELRELEASE)/build M=$(PWD) clean
