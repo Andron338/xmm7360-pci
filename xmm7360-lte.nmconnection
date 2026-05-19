@@ -1,0 +1,22 @@
+# NetworkManager connection for XMM7360 / Fibocom L850 LTE modem
+# Uses raw IP on wwan0 via open_xdatachannel — no PPP, no pppd.
+# Install to /etc/NetworkManager/system-connections/
+
+[connection]
+id=LTE
+uuid=ff384830-5978-443f-bec7-8cd97b4670a7
+type=ethernet
+interface-name=wwan0
+autoconnect=false
+# Increase dispatcher timeout so our tool has time to attach + get IP
+# (override in /etc/NetworkManager/NetworkManager.conf if needed)
+
+[ethernet]
+wake-on-lan=default
+
+[ipv4]
+# disabled: NM does not touch IPv4 — our dispatcher script handles it
+method=disabled
+
+[ipv6]
+method=disabled

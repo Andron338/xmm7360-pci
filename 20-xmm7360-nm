@@ -1,0 +1,48 @@
+#!/bin/bash
+# /etc/NetworkManager/dispatcher.d/20-xmm7360-nm
+#
+# Handles connect/disconnect for the LTE connection on wwan0.
+# NM calls this synchronously — we block until the operation is done.
+# NM timeout is set to 30s in conf.d/xmm7360.conf.
+
+IFACE="$1"
+ACTION="$2"
+
+[ "$IFACE" = "wwan0" ] || exit 0
+
+CONF="/etc/xmm7360.conf"
+[ -f "$CONF" ] && source "$CONF"
+XMM_APN="${XMM_APN:-internet}"
+XMM_METRIC="${XMM_METRIC:-1000}"
+
+log() { logger -t xmm7360-nm "$*"; }
+
+case "$ACTION" in
+    pre-up)
+        log "wwan0 pre-up: starting data channel (apn=$XMM_APN)"
+
+        # Clear init sentinel so service can run
+        rm -f /run/xmm7360-init.done
+
+        # Start init service synchronously — it runs open_xdatachannel
+        # in full mode, configures wwan0 with IP+route, then exits.
+        systemctl start xmm7360-init.service
+
+        # Verify wwan0 got an IP
+        if ip addr show wwan0 | grep -q 'inet '; then
+            log "wwan0 pre-up: connected ($(ip addr show wwan0 | awk '/inet /{print $2}'))"
+        else
+            log "wwan0 pre-up: no IP assigned — connection may show limited"
+        fi
+        ;;
+
+    pre-down)
+        log "wwan0 pre-down: tearing down data channel"
+
+        # Trigger recovery (stops MM, reloads module, reinitialises)
+        # so the modem is in a clean state for next connect
+        systemctl start xmm7360-recovery.service
+        ;;
+esac
+
+exit 0

@@ -90,10 +90,15 @@ package() {
     install -Dm644 "$_src/xmm7360-modprobe.conf" \
         "${pkgdir}/usr/lib/modprobe.d/xmm7360.conf"
 
-    # ── NM conf.d: leave wwan0 to our tool, do not attempt PPP ────────────
+    # ── NM integration: LTE connection + dispatcher + timeout conf ────────
     install -dm755 "${pkgdir}/etc/NetworkManager/conf.d"
-    printf "[device]\nmatch-device=interface-name:wwan0\nmanaged=false\n" \
-        > "${pkgdir}/etc/NetworkManager/conf.d/xmm7360.conf"
+    install -dm755 "${pkgdir}/etc/NetworkManager/system-connections"
+    install -Dm600 "$_src/xmm7360-lte.nmconnection" \
+        "${pkgdir}/etc/NetworkManager/system-connections/xmm7360-lte.nmconnection"
+    install -Dm644 "$_src/xmm7360-nm.conf" \
+        "${pkgdir}/etc/NetworkManager/conf.d/xmm7360.conf"
+    install -Dm755 "$_src/20-xmm7360-nm" \
+        "${pkgdir}/etc/NetworkManager/dispatcher.d/20-xmm7360-nm"
 
     # ── Default config ───────────────────────────────────────────────────
     install -Dm644 /dev/null "${pkgdir}/etc/xmm7360.conf"
