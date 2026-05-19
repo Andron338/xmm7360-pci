@@ -2,7 +2,7 @@
 # AUR: https://aur.archlinux.org/packages/xmm7360-dkms-git
 
 pkgname=xmm7360-dkms-git
-pkgver=r280.g1e9c9b4   # updated by pkgver() below
+pkgver=r1.g0000000   # updated by pkgver() below
 pkgrel=1
 pkgdesc="Intel XMM7360 / Fibocom L850 LTE modem driver (DKMS) with RPC init tool"
 arch=('x86_64')
@@ -89,6 +89,11 @@ package() {
     # ── modprobe config (blacklist iosm) ─────────────────────────────────
     install -Dm644 "$_src/xmm7360-modprobe.conf" \
         "${pkgdir}/usr/lib/modprobe.d/xmm7360.conf"
+
+    # ── NM conf.d: leave wwan0 to our tool, do not attempt PPP ────────────
+    install -dm755 "${pkgdir}/etc/NetworkManager/conf.d"
+    printf "[device]\nmatch-device=interface-name:wwan0\nmanaged=false\n" \
+        > "${pkgdir}/etc/NetworkManager/conf.d/xmm7360.conf"
 
     # ── Default config ───────────────────────────────────────────────────
     install -Dm644 /dev/null "${pkgdir}/etc/xmm7360.conf"

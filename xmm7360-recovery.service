@@ -14,9 +14,9 @@ ExecStart=/bin/sh -c '\
     logger -t xmm7360-recovery "Attempting clean RPC disconnect"; \
     if open_xdatachannel --disconnect 2>/dev/null; then \
         logger -t xmm7360-recovery "RPC disconnect succeeded — reinitialising"; \
-        open_xdatachannel --init-only && { \
+        . /etc/xmm7360.conf 2>/dev/null || true; \
+        open_xdatachannel --apn ${XMM_APN:-internet} --metric ${XMM_METRIC:-1000} && { \
             touch /run/xmm7360-init.done; \
-            logger -t xmm7360-recovery "Reinit succeeded — no module reload needed"; \
             mmcli -m 0 --signal-setup=5 2>/dev/null || true; \
             logger -t xmm7360-recovery "Recovery complete (fast path)"; \
             exit 0; \
@@ -40,7 +40,7 @@ ExecStart=/bin/sh -c '\
     modprobe xmm7360; \
     udevadm settle; \
     \
-    logger -t xmm7360-recovery "Starting RPC init"; \
+    logger -t xmm7360-recovery "Starting data channel"; \
     systemctl start xmm7360-init.service; \
     \
     logger -t xmm7360-recovery "Restarting ModemManager"; \

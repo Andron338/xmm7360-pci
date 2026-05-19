@@ -1,8 +1,6 @@
 [Unit]
-Description=XMM7360 Modem RPC Initialisation
-# Works for both WWAN path (wwan0at0) and TTY fallback (ttyXMM1).
-# The udev SYSTEMD_WANTS trigger fires for whichever device appears.
-After=network.target
+Description=XMM7360 Modem — data channel bring-up
+After=dev-ttyXMM1.device
 Before=ModemManager.service
 ConditionPathExists=!/run/xmm7360-init.done
 
@@ -12,11 +10,17 @@ RemainAfterExit=yes
 
 EnvironmentFile=-/etc/xmm7360.conf
 
-ExecStart=/usr/bin/open_xdatachannel --init-only
+ExecStartPre=/usr/bin/sleep 0.1
+
+# Full mode: init, attach, open data channel, configure wwan0 with IP+route.
+# Same path as iosm — raw IP on wwan0, no PPP.
+ExecStart=/usr/bin/open_xdatachannel \
+    --apn ${XMM_APN:-internet} \
+    --metric ${XMM_METRIC:-1000}
 
 ExecStartPost=/usr/bin/touch /run/xmm7360-init.done
 
-# Retry signal setup until MM actually has the modem
+# Tell MM to poll signal every 5s via ttyXMM AT ports
 ExecStartPost=/bin/sh -c '\
     for i in $(seq 1 30); do \
         mmcli -m 0 --signal-setup=5 2>/dev/null && break; \
